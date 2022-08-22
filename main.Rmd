@@ -1,0 +1,155 @@
+---
+title: "Classification d'aliments à partir de leurs éléments nutritifs"
+author: "Jean-Simon Bouchard"
+date: '2022-08-22'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Processus analytique et objectifs
+
+L'algorithme d'apprentissage machine par arbre de décision CART sera utilisé afin de classifier différents aliments.
+
+La source de données, une base de données relationnelle regroupant 12 fichiers CSV, provient du [Fichier canadien sur les éléments nutritifs (FCÉN), 2015](https://www.canada.ca/fr/sante-canada/services/aliments-nutrition/saine-alimentation/donnees-nutritionnelles/fichier-canadien-elements-nutritifs-fcen-2015.html), tel que consulté le 21 août 2022.
+
+Plus précisément, les éléments suivants seront à l'étude :
+
+* Préparation du jeu de données
+* Entraînement du modèle
+* Prédictions à partir du modèle et d'un échantillon test
+* Validation du modèle
+
+## Exploration des données
+
+Les 4 fichiers source sont d'abord importés avec la fonction read.csv().
+
+```{r importFiles, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(xgboost)
+
+
+setwd("C:\\Users\\jsbou\\Documents\\Dev\\R\\Breakfast\\Dataset\\")
+
+## Importer tous les fichiers sources au format CSV vers un dataframe
+food_group <- read.csv(file="FOOD GROUP.csv", stringsAsFactors = TRUE)
+food_name <- read.csv(file="FOOD NAME.csv", stringsAsFactors = TRUE)
+nutrient_amount <- read.csv(file="NUTRIENT AMOUNT.csv", stringsAsFactors = TRUE)
+nutrient_name <- read.csv(file="NUTRIENT NAME.csv", stringsAsFactors = TRUE)
+
+```
+
+Ensuite, les types de données sont modifiés.
+
+```{r nettoyage}
+str(food_group)
+
+str(food_name)
+food_name$FoodDateOfEntry <- as.Date(food_name$FoodDateOfEntry)
+food_name$FoodDateOfPublication <- as.Date(food_name$FoodDateOfPublication)
+
+str(nutrient_name)
+
+```
+
+## Préparation des données
+
+Les jeux de données étant liés entre eux, certaines manipulations des données sont nécessaires afin d'obtenir un jeu de données prêt pour être utilisé dans le modèle.
+
+```{r preparation}
+
+# Regroupement des données sur les aliments et les groupes d'aliments
+food_name_labeled <- left_join(food_name, food_group, by = "FoodGroupID") %>%
+  select(FoodID, FoodDescriptionF, FoodGroupNameF)
+
+# Regroupement des données sur les nutriments et les quantités de nutriments
+nutrient_labeled <- left_join(nutrient_name, nutrient_amount, by = "NutrientID") %>%
+  select(FoodID, NutrientNameF, NutrientValue)
+
+# Transposition du dataframe nutrient_labeled afin d'obtenir une colonne par type de nutriment
+nutrient_wider <- nutrient_labeled %>%
+  pivot_wider(id_cols = FoodID, values_from = NutrientValue, names_from = NutrientNameF)
+
+# Regroupement des données sur les aliments et les nutriments
+food_complete <- left_join(food_name_labeled, nutrient_wider, by = "FoodID")
+
+# Création d'une colonne VRAI/FAUX à savoir si le groupe d'aliment correspond à "Céréales à déjeuner". Le modèle tentera de déterminer si la valeur est vraie ou fausse
+food_complete$cereales_dejeuner <- ifelse(food_complete$FoodGroupNameF == "Céréales à déjeuner", TRUE, FALSE)
+
+# Retrait des 3 premières colonnes du jeu de données, car elles ne seront pas nécessaires à l'analyse
+food_complete <- food_complete %>%
+  select(4:ncol(food_complete))
+
+
+# Ajustement des noms de colonnes afin d'éviter des noms invalides
+colnames(food_complete) <- make.names(colnames(food_complete))
+
+```
+
+Le jeu de données est ensuite séparé en deux ensembles, soit un ensemble d'entraînement (80% des lignes) et un ensemble de test (20% des lignes).
+
+```{r separation}
+
+# Fonction permettant de séparer le jeu de données en deux ensembles
+create_train_test <- function(data, size = 0.8, train = TRUE) {
+    n_row = nrow(data)
+    total_row = size * n_row
+    train_sample <- 1: total_row
+    if (train == TRUE) {
+        return (data[train_sample, ])
+    } else {
+        return (data[-train_sample, ])
+    }
+}
+
+train <- create_train_test(food_complete, train = TRUE)
+
+test <- create_train_test(food_complete, train = FALSE)
+
+```
+
+## Modélisation
+
+Avec le package rpart, un arbre décisionnel est ensuite généré avec l'ensemble d'entraînement, puis des prédictions sont faites avec l'ensemble de test.
+
+Certaines configurations (variable control ci-dessous) sont aussi incluses dans la fonction rpart(). Voici la signification des différentes configurations :
+
+* minsplit : Le nombre minimal d'observations dans un noeud pour qu'une coupure soit appliquée;
+* minbucket : Le nombre minimal d'observations dans un noeud final;
+* maxdepth : La profondeur maximale des noeuds de l'arbre final.
+
+L'exactitude, ou plutôt le taux de bonnes classifications correspondent à la somme de la diagonale de la matrice de confusion, divisée par la somme des valeurs de la matrice de confusion.
+
+```{r modelisation}
+
+library(rpart)
+library(rpart.plot)
+
+control <- rpart.control(minsplit = 4,
+    minbucket = round(5 / 3),
+    maxdepth = 3,
+    cp = 0)
+
+fit <- rpart(cereales_dejeuner~ ., data = train, method = "class", control = control)
+
+rpart.plot(fit)
+
+predict <-predict(fit, test, type = "class")
+
+mat_conf <- table(test$cereales_dejeuner, predict)
+
+rownames(mat_conf) <- paste("Actual", rownames(mat_conf), sep = ":")
+colnames(mat_conf) <- paste("Pred", colnames(mat_conf), sep = ":")
+
+mat_conf
+
+exactitude <- sum(diag(mat_conf)) / sum(mat_conf)
+
+print(paste0("Taux de bonnes classifications : ", exactitude))
+
+```
+
+Avec un taux de bonnes classifications à `r exactitude`, le modèle a une précision satisfaisante (`r round(exactitude * 100, 0)`% de bonnes classifications) dans la classification de ce groupe d'aliments à partir des éléments nutritifs de différents aliments.
